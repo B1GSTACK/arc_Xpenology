@@ -29,7 +29,7 @@ arc_mode || die "No bootmode found!"
 
 if [ -f "${USER_CONFIG_FILE}" ]; then
   case "$(readConfigKey "kernel" "${USER_CONFIG_FILE}")" in
-  custom) writeConfigKey "kernel" "legacy" "${USER_CONFIG_FILE}" ;;
+  custom|full|upstreamed) writeConfigKey "kernel" "legacy" "${USER_CONFIG_FILE}" ;;
   esac
 fi
 
@@ -81,7 +81,7 @@ initConfigKey "bootscreen.systeminfo" "true" "${USER_CONFIG_FILE}"
 initConfigKey "bootscreen.diskinfo" "false" "${USER_CONFIG_FILE}"
 initConfigKey "bootscreen.accesstokeninfo" "false" "${USER_CONFIG_FILE}"
 initConfigKey "bootscreen.dsmlogo" "true" "${USER_CONFIG_FILE}"
-initConfigKey "bootipwait" "20" "${USER_CONFIG_FILE}"
+initConfigKey "bootipwait" "60" "${USER_CONFIG_FILE}"
 initConfigKey "device" "{}" "${USER_CONFIG_FILE}"
 initConfigKey "directboot" "false" "${USER_CONFIG_FILE}"
 initConfigKey "dsmfullver" "" "${USER_CONFIG_FILE}"
@@ -128,6 +128,11 @@ if arrayExistItem "sortnetif:" $(readConfigMap "addons" "${USER_CONFIG_FILE}"); 
 fi
 # netfix is gone; drop its switch.
 deleteConfigKey "arc.netfix" "${USER_CONFIG_FILE}"
+# notification is a system addon, which took over notify and updatenotify:
+# none of the three is the user's to choose any more.
+deleteConfigKey "addons.notification" "${USER_CONFIG_FILE}"
+deleteConfigKey "addons.notify" "${USER_CONFIG_FILE}"
+deleteConfigKey "addons.updatenotify" "${USER_CONFIG_FILE}"
 
 # Sort network interfaces: bus order, pinned MACs first. Always, so a port is
 # the same ethN in the loader and in DSM, which boot.sh gives the same order.
@@ -214,7 +219,7 @@ esac
 echo
 
 BOOTIPWAIT="$(readConfigKey "bootipwait" "${USER_CONFIG_FILE}")"
-[ -z "${BOOTIPWAIT}" ] && BOOTIPWAIT=30
+[ -z "${BOOTIPWAIT}" ] && BOOTIPWAIT=60
 echo -e "\033[1;34mNetwork (${ETHN} NIC)\033[0m"
 RESTARTED=0
 if [ ! -f "/.dockerenv" ]; then
@@ -228,6 +233,8 @@ fi
 [ "${RESTARTED}" = "1" ] && sleep 5
 IPCON=""
 checkNIC
+onlineCheck
+echo -e "Offline Mode: \033[1;34m$(readConfigKey "arc.offline" "${USER_CONFIG_FILE}")\033[0m"
 echo
 
 # Tell webterminal that the loader is ready
@@ -257,8 +264,17 @@ if [ "${DEVELOPMENT_MODE}" = "true" ]; then
   echo -e "\033[1;34mDevelopment Mode is enabled.\033[0m"
   curl -skL https://github.com/AuxXxilium/arc/archive/refs/heads/dev.zip -o /tmp/arc-dev.zip 2>/dev/null || true
   unzip -q /tmp/arc-dev.zip -d /tmp 2>/dev/null || true
-  cp -rf /tmp/arc-dev/files/initrd/opt/arc /opt 2>/dev/null || true
-  rm -rf /tmp/arc-dev /tmp/arc-dev.zip
+  # Swap the directory, never write into it: bash reads this script as it runs,
+  # and an init.sh rewritten in place is read on at the old offset.
+  rm -rf /opt/arc.new
+  if cp -rf /tmp/arc-dev/files/initrd/opt/arc /opt/arc.new 2>/dev/null; then
+    rm -rf /opt/arc.old
+    if mv -f /opt/arc /opt/arc.old; then
+      mv -f /opt/arc.new /opt/arc || mv -f /opt/arc.old /opt/arc
+    fi
+    rm -rf /opt/arc.old
+  fi
+  rm -rf /opt/arc.new /tmp/arc-dev /tmp/arc-dev.zip
 fi
 
 # Notification System

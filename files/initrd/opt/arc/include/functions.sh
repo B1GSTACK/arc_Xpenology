@@ -55,43 +55,58 @@ function arc_mode() {
 
 ###############################################################################
 # Check for NIC and IP
+# Waits up to bootipwait (60s at most) for the NICs' addresses, all NICs at
+# once rather than one after another. A NIC with no cable in holds it up only
+# while no other NIC has an address; one with a link but no lease yet gets 10s
+# more after the first address. Link-local is no address: dhcpcd keeps asking.
 function checkNIC() {
   sleep 3 # Wait for network to initialize
   IPCON=""
   BOOTIPWAIT="$(readConfigKey "bootipwait" "${USER_CONFIG_FILE}")"
-  [ -z "${BOOTIPWAIT}" ] && BOOTIPWAIT="20"
+  [ -z "${BOOTIPWAIT}" ] && BOOTIPWAIT="60"
+  [ "${BOOTIPWAIT}" -gt 60 ] 2>/dev/null && BOOTIPWAIT="60"
   ETHX="$(find /sys/class/net/ -mindepth 1 -maxdepth 1 -name 'eth*' -exec basename {} \; | sort -V)"
-  for N in ${ETHX}; do
-    COUNT=0
-    DRIVER="$(ls -ld /sys/class/net/${N}/device/driver 2>/dev/null | awk -F '/' '{print $NF}')"
-    while true; do
-      if [ "$(cat /sys/class/net/${N}/carrier 2>/dev/null)" -eq 0 ]; then
-        echo -e "\r${DRIVER}: \033[1;37mNOT CONNECTED\033[0m"
-        break
-      fi
-      if [ -z "$(cat /sys/class/net/${N}/carrier 2>/dev/null)" ]; then
-        echo -e "\r${DRIVER}: \033[1;37mDOWN\033[0m"
-        break
-      fi
-      if [ "${COUNT}" -ge "${BOOTIPWAIT}" ]; then
-        echo -e "\r${DRIVER}: \033[1;37mTIMEOUT\033[0m"
-        break
-      fi
-      COUNT=$((COUNT + 1))
+  local N IP WAITING ELAPSED START FIRST=""
+  START="$(date +%s)"
+  while true; do
+    IPCON=""
+    WAITING=0
+    for N in ${ETHX}; do
       IP="$(getIP "${N}")"
-      if [ -n "${IP}" ]; then
-        SPEED="$(/usr/sbin/ethtool ${N} 2>/dev/null | grep "Speed:" | awk '{print $2}')"
-        if echo "${IP}" | grep -q "^169\.254\."; then
-          echo -e "\r${DRIVER} (${SPEED}): \033[1;37mLINK LOCAL (No DHCP server found.)\033[0m"
-        else
-          echo -e "\r${DRIVER} (${SPEED}): \033[1;37m${IP}\033[0m"
-          [ -z "${IPCON}" ] && IPCON="${IP}"
-        fi
-        break
+      if [ -n "${IP}" ] && ! echo "${IP}" | grep -q "^169\.254\."; then
+        [ -z "${IPCON}" ] && IPCON="${IP}"
+      elif [ "$(cat /sys/class/net/${N}/carrier 2>/dev/null)" = "1" ]; then
+        WAITING=1
       fi
-      sleep 1
     done
+    ELAPSED=$(($(date +%s) - START))
+    if [ -n "${IPCON}" ]; then
+      [ -z "${FIRST}" ] && FIRST="${ELAPSED}"
+      [ "${WAITING}" = "0" ] && break
+      [ $((ELAPSED - FIRST)) -ge 10 ] && break
+    fi
+    [ "${ELAPSED}" -ge "${BOOTIPWAIT}" ] && break
+    echo -en "\rWaiting for IP: ${ELAPSED}s"
     sleep 1
+  done
+  echo -en "\r\033[K"
+  for N in ${ETHX}; do
+    DRIVER="$(ls -ld /sys/class/net/${N}/device/driver 2>/dev/null | awk -F '/' '{print $NF}')"
+    IP="$(getIP "${N}")"
+    if [ -z "$(cat /sys/class/net/${N}/carrier 2>/dev/null)" ]; then
+      echo -e "${DRIVER}: \033[1;37mDOWN\033[0m"
+    elif [ "$(cat /sys/class/net/${N}/carrier 2>/dev/null)" -eq 0 ]; then
+      echo -e "${DRIVER}: \033[1;37mNOT CONNECTED\033[0m"
+    elif [ -z "${IP}" ]; then
+      echo -e "${DRIVER}: \033[1;37mTIMEOUT\033[0m"
+    else
+      SPEED="$(/usr/sbin/ethtool ${N} 2>/dev/null | grep "Speed:" | awk '{print $2}')"
+      if echo "${IP}" | grep -q "^169\.254\."; then
+        echo -e "${DRIVER} (${SPEED}): \033[1;37mLINK LOCAL (No DHCP server found.)\033[0m"
+      else
+        echo -e "${DRIVER} (${SPEED}): \033[1;37m${IP}\033[0m"
+      fi
+    fi
   done
 }
 
@@ -103,6 +118,25 @@ function die() {
 }
 
 ###############################################################################
+# Make a file in the ramdisk executable, or report why not
+# 1 - File
+# Return 0 if it is executable afterwards
+#
+# A script without its execute bit fails at boot as "/addons/addons.sh:
+# Permission denied", and linuxrc then runs no addon at all - so chmod's
+# failure is the build's. Run by Arc Control under DSM's kernel, the loader's
+# chmod failed with "Function not implemented" and the build went on.
+function makeExecutable() {
+  local ERR
+  ERR="$(chmod a+x "${1}" 2>&1)"
+  if [ ! -x "${1}" ]; then
+    echo "ERROR: Ramdisk: cannot make ${1#"${RAMDISK_PATH}"} executable${ERR:+ (${ERR})}" | tee -a "${LOG_FILE}"
+    return 1
+  fi
+  return 0
+}
+
+###############################################################################
 # Check if a item exists into array
 # 1 - Item
 # 2.. - Array
@@ -134,6 +168,23 @@ function arrayExistItem() {
     break
   done
   return ${EXISTS}
+}
+
+###############################################################################
+# Check if a custom kernel is offered for the platform
+# 1 - Platform
+# 2 - DSM version (optional, any version if empty)
+# Return 0 if offered
+function isCustomKernelPlatform() {
+  if arrayExistItem "${1}" "${CUSTOMKERNEL72L[@]}"; then
+    [ -z "${2}" ] || [[ ! "${2}" < "7.2" ]]
+  elif arrayExistItem "${1}" "${CUSTOMKERNEL73L[@]}"; then
+    [ -z "${2}" ] || [[ ! "${2}" < "7.3" ]]
+  elif arrayExistItem "${1}" "${CUSTOMKERNEL74L[@]}"; then
+    [ -z "${2}" ] || [[ ! "${2}" < "7.4" ]]
+  else
+    return 1
+  fi
 }
 
 ###############################################################################
@@ -503,7 +554,10 @@ function getNicId() {
 # Find and mount the DSM root filesystem
 function findDSMRoot() {
   local DSMROOTS=""
-  [ -z "${DSMROOTS}" ] && DSMROOTS="$(mdadm --detail --scan 2>/dev/null | grep -v "INACTIVE-ARRAY" | grep -E "name=SynologyNAS:0|name=DiskStation:0|name=SynologyNVR:0|name=BeeStation:0" | awk '{print $2}' | uniq)"
+  # mdadm 4.2 printed "ARRAY /dev/md0 ... name=SynologyNAS:0", mdadm 4.3 (Buildroot 2026.02)
+  # prints the name only in the path, "ARRAY /dev/md/SynologyNAS:0 ...": match both, and
+  # resolve the /dev/md/<name> link to the md device it points to.
+  [ -z "${DSMROOTS}" ] && DSMROOTS="$(mdadm --detail --scan 2>/dev/null | grep -v "INACTIVE-ARRAY" | grep -E "(name=|/dev/md/)(SynologyNAS|DiskStation|SynologyNVR|BeeStation):0( |$)" | awk '{print $2}' | while read -r D; do readlink -f "${D}" 2>/dev/null || echo "${D}"; done | uniq)"
   [ -z "${DSMROOTS}" ] && DSMROOTS="$(lsblk -pno KNAME,PARTN,FSTYPE,FSVER,LABEL | grep -E "sd[a-z]{1,2}1" | grep -w "linux_raid_member" | grep "0.9" | awk '{print $1}')"
   echo "${DSMROOTS}"
 }
@@ -562,28 +616,54 @@ function delCmdline() {
 }
 
 ###############################################################################
-# check for a PWM fan controller or PWM/fan signals
-# Accepts a pwm[0-9] control channel or a fan[0-9]_input tach signal, both of
-# which indicate a fan the addon can work with.
+# a ramdisk's format by its magic, in the names file --mime-type gives them:
+# the image has no file(1)
+# 1 - path
+function ramdiskFormat() {
+  case "$(od -An -tx1 -N6 "${1}" 2>/dev/null | tr -d ' \n')" in
+  303730373031* | 303730373032*) echo "application/x-cpio" ;;
+  fd377a585a00*) echo "application/x-xz" ;;
+  04224d18*) echo "application/x-lz4" ;;
+  5d0000*) echo "application/x-lzma" ;;
+  425a68*) echo "application/x-bzip2" ;;
+  1f8b*) echo "application/gzip" ;;
+  28b52ffd*) echo "application/zstd" ;;
+  esac
+}
+
+###############################################################################
+# check for a server's BMC (iDRAC, iLO, XCC, ...): ACPI's IPI0001 device or
+# SPMI table, its IPMI interface. As arx's hwscan.hasBMC.
+function hasBMC() {
+  ls /sys/bus/acpi/devices/IPI0001:* >/dev/null 2>&1 && return 0
+  [ -e /sys/firmware/acpi/tables/SPMI ]
+}
+
+###############################################################################
+# check for a fan the sensors addon can drive: a pwmN control channel. A
+# fanN_input alone is a fan it can only read, like 6.18's acpi_fan.
+# The loader only autoloads modules by modalias, so the Super I/O chips
+# (nct6775, it87, ...) have no driver until one is loaded here: always, once
+# per boot, as arx's hwscan.FanChips, since acpi_fan's fan1_input would
+# otherwise hide an it8613 that was never looked for. Not where a BMC owns
+# the Super I/O and the fans: blind probes poke what it drives.
 # The entries under /sys/class/hwmon are symlinks into /sys/devices, so find
 # needs -L to descend into them. Keep -maxdepth 2: the attributes sit directly
 # below the hwmonN symlink, and sysfs symlink cycles (device/wakeup/device/...)
 # would otherwise send find on a long walk through the whole device tree.
-# The loader only autoloads modules by modalias, so ISA/superio hwmon chips
-# (nct6775, it87, ...) are not bound yet. Probe sysfs first and only load the
-# superio drivers as a fallback when nothing is exposed.
 function checkPWMSignal() {
-  local SIG
-  SIG="$(find -L /sys/class/hwmon/ -maxdepth 2 \( -name 'pwm[0-9]' -o -name 'fan[0-9]_input' \) 2>/dev/null | head -1)"
-  [ -n "${SIG}" ] && return 0
+  local M SIG
+  if [ ! -f "/tmp/.fanprobe" ] && ! hasBMC; then
+    # Not every board has every chip; a driver that finds nothing refuses
+    # to load, which is the expected outcome.
+    for M in it87 nct6683 nct6775 w83627ehf f71882fg dell-smm-hwmon asus-wmi-sensors it5571; do
+      modprobe "${M}" >/dev/null 2>&1
+    done
+  fi
+  touch "/tmp/.fanprobe"
 
-  for M in nct6775 it87 w83627ehf f71882fg dell-smm-hwmon asus-wmi-sensors; do
-    lsmod | grep -q "^${M} " || modprobe "${M}" 2>/dev/null
-  done
-
-  SIG="$(find -L /sys/class/hwmon/ -maxdepth 2 \( -name 'pwm[0-9]' -o -name 'fan[0-9]_input' \) 2>/dev/null | head -1)"
-  [ -n "${SIG}" ] && return 0
-  return 1
+  SIG="$(find -L /sys/class/hwmon/ -maxdepth 2 \( -name 'pwm[0-9]' -o -name 'pwm[0-9][0-9]' \) 2>/dev/null | head -1)"
+  [ -n "${SIG}" ]
 }
 
 ###############################################################################
@@ -742,35 +822,45 @@ function livepatch() {
 }
 
 ###############################################################################
-# Check NTP and Keyboard Layout
+# Region, Timezone, Keyboard Layout and Offline Mode, once per boot (init.sh).
+# The region lookup is the online check: no answer means offline. The user
+# can switch Offline Mode in the menu afterwards, until the next boot.
 function onlineCheck() {
-  REGION="$(curl -m 10 -v "http://ip-api.com/line?fields=timezone" 2>/dev/null | tr -d '\n' | cut -d '/' -f1)"
-  TIMEZONE="$(curl -m 10 -v "http://ip-api.com/line?fields=timezone" 2>/dev/null | tr -d '\n' | cut -d '/' -f2)"
-  KEYMAP="$(curl -m 10 -v "http://ip-api.com/line?fields=countryCode" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
-  [ -z "${KEYMAP}" ] && KEYMAP="$(readConfigKey "keymap" "${USER_CONFIG_FILE}")"
-  [ -z "${KEYMAP}" ] && KEYMAP="us"
-  if [ -n "${REGION}" ] && [ -n "${TIMEZONE}" ]; then
+  local GEO TZ COUNTRY
+  GEO="$(curl -m 10 -s "http://ip-api.com/line?fields=countryCode,timezone" 2>/dev/null)"
+  TZ="$(echo "${GEO}" | grep -m1 -E '^[A-Za-z_]+/[A-Za-z0-9_/+-]+$')"
+  COUNTRY="$(echo "${GEO}" | grep -m1 -E '^[A-Z]{2}$')"
+  if [ -n "${TZ}" ]; then
+    writeConfigKey "arc.offline" "false" "${USER_CONFIG_FILE}"
+    REGION="${TZ%%/*}"
+    TIMEZONE="${TZ#*/}"
     writeConfigKey "time.region" "${REGION}" "${USER_CONFIG_FILE}"
     writeConfigKey "time.timezone" "${TIMEZONE}" "${USER_CONFIG_FILE}"
   else
+    writeConfigKey "arc.offline" "true" "${USER_CONFIG_FILE}"
     REGION="$(readConfigKey "time.region" "${USER_CONFIG_FILE}")"
     TIMEZONE="$(readConfigKey "time.timezone" "${USER_CONFIG_FILE}")"
   fi
   [ -n "${TIMEZONE}" ] && [ -n "${REGION}" ] && ln -sf "/usr/share/zoneinfo/${REGION}/${TIMEZONE}" /etc/localtime
+  KEYMAP="$(echo "${COUNTRY}" | tr '[:upper:]' '[:lower:]')"
+  [ -z "${KEYMAP}" ] && KEYMAP="$(readConfigKey "keymap" "${USER_CONFIG_FILE}")"
+  [ -z "${KEYMAP}" ] && KEYMAP="us"
   LAYOUT="$(readConfigKey "layout" "${USER_CONFIG_FILE}")"
   if [ -z "${LAYOUT}" ]; then
     [ -n "${KEYMAP}" ] && KEYMAP="$(echo ${KEYMAP} | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | tr -d '[:punct:]' | tr -d '[:digit:]')"
     loadkeys "${KEYMAP}" 2>/dev/null
     writeConfigKey "keymap" "${KEYMAP}" "${USER_CONFIG_FILE}"
   fi
+}
+
+###############################################################################
+# Latest release tag into NEWTAG, empty if not newer or in Offline Mode
+function updateCheck() {
+  NEWTAG=""
+  [ "$(readConfigKey "arc.offline" "${USER_CONFIG_FILE}")" = "true" ] && return 0
   local ARC_VERSION_BASE="${ARC_VERSION%%[a-z]*}"
   local ARC_VERSION_BETA="${ARC_VERSION#${ARC_VERSION_BASE}}"
   NEWTAG="$(curl -m 10 -skL "${API_URL}" | jq -r 'if type=="array" then .[].tag_name // empty else empty end' 2>/dev/null | grep -v "dev" | sort -rV | head -1)"
-  if [ -n "${NEWTAG}" ]; then
-    writeConfigKey "arc.offline" "false" "${USER_CONFIG_FILE}"
-  else
-    writeConfigKey "arc.offline" "true" "${USER_CONFIG_FILE}"
-  fi
   if [ -n "${ARC_VERSION_BETA}" ] && [ -n "${BETA_API_URL}" ]; then
     local BETANEWTAG="$(curl -m 10 -skL "${BETA_API_URL}" | jq -r 'if type=="array" then .[].tag_name // empty else empty end' 2>/dev/null | grep -v "dev" | sort -rV | head -1)"
     if [ -n "${BETANEWTAG}" ] && [ -n "${NEWTAG}" ]; then

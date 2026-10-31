@@ -34,7 +34,7 @@ Arc turns an x86-64 PC, server or VM into a DSM 7.x machine. You write it to a d
 * **Guided setup** — Choose Model → Build Loader → Boot Loader, with DSM version, addons and modules picked for you and changeable before the build
 * **Wide hardware support** — 4.4 and 5.10 based platforms, drivers for many controllers and NICs, SATA PortMap and DTS map options for the disk layout
 * **Custom kernels** — on the 5.10 platforms with DSM 7.3 and later, choose between Synology's stock kernel and [arc-custom](https://github.com/AuxXxilium/arc-custom)'s kernels with hybrid CPU and wider hardware support
-* **Arc Patch** — a serial and MACs for the chosen model, with AME, QuickConnect, push notifications and more; or bring your own, or use random ones
+* **Arc Patch** — a serial and MACs for the chosen model, with AME, QuickConnect and more; or bring your own, or use random ones
 * **Addons and modules** — select addons (stable and beta) and kernel modules per build
 * **Hardware options** — NIC order, fan control, CPU scaling governor, GPU passthrough (IOMMU), USB disks as internal, eMMC and SATA DOM boot
 * **DSM options** — edit cmdline and synoinfo, add a user or change a password, allow a DSM downgrade, reset the network config, force-enable SSH, clear blocked IPs and the update cache
@@ -59,13 +59,17 @@ Two systems, two jobs: **Arc prepares DSM**, and **DSM runs your NAS**. Arc buil
 
 ## 🖥️ Supported
 
-| Platform | Kernel | DSM |
-| :-- | :-- | :-- |
-| `apollolake`, `broadwell`, `broadwellnk`, `broadwellnkv2`, `broadwellntbap`, `denverton`, `geminilake`, `purley`, `r1000`, `v1000` | 4.4.302 | 7.2, 7.3, 7.4 |
-| `epyc7002`, `geminilakenk`, `r1000nk`, `v1000nk` | 5.10.55 | 7.2, 7.3, 7.4 |
-| `epyc7003`, `epyc7003ntb`, `icelaked` | 5.10.55 | 7.4 |
+| Platform | Kernel | DSM | Custom kernel |
+| :-- | :-- | :-- | :-- |
+| `apollolake`, `broadwell`, `broadwellnk`, `broadwellnkv2`, `broadwellntbap`, `denverton`, `geminilake`, `purley`, `r1000`, `v1000` | 4.4.302 | 7.2, 7.3, 7.4 | — |
+| `epyc7002` | 5.10.55 | 7.2, 7.3, 7.4 | 7.2, 7.3, 7.4 |
+| `geminilakenk`, `r1000nk`, `v1000nk` | 5.10.55 | 7.2, 7.3, 7.4 | 7.3, 7.4 |
+| `epyc7003`, `icelaked` | 5.10.55 | 7.4 | 7.4 |
+| `epyc7003ntb` | 5.10.55 | 7.4 | — |
 
 The platforms and models come from [arc-configs](https://github.com/AuxXxilium/arc-configs); the menu shows which models fit the machine.
+
+A custom kernel replaces Synology's stock kernel: `legacy` adds hybrid CPU and wider hardware support, and runs under Hyper-V. Pick it under Kernel in the menu when it is shipped for your version.
 
 ---
 
@@ -99,7 +103,6 @@ No internet on the machine? Arc can also update offline from an update file from
 
 | Project | Description |
 | :-- | :-- |
-| [Arc Loader Essential](https://github.com/AuxXxilium/arc-essential) | Arc with reduced size, only for Linux 5.x models |
 | [Arc Loader Beta](https://github.com/AuxXxilium/arc-beta) | Beta releases of Arc |
 | [Arc Loader Custom](https://auxxxilium.github.io/arc) | Loader with automated installation |
 | [arx](https://github.com/AuxXxilium/arx) | The evolution of Arc — set up entirely from your browser |

@@ -13,7 +13,7 @@
 . "${ARC_PATH}/arc-functions.sh"
 
 # Check System
-onlineCheck
+updateCheck
 systemCheck
 readData
 
@@ -135,7 +135,8 @@ elif [ "${ARC_MODE}" = "config" ]; then
           write_menu_value "v" "GPU Passthrough (IOMMU)" "$( [ "${IOMMUPT}" = "true" ] && echo "use in VM" || echo "use in DSM" )"
         fi
 
-        if [ "${PLATFORM}" = "epyc7002" ] || [ "${PLATFORM}" = "geminilakenk" ] || [ "${PLATFORM}" = "r1000nk" ] || [ "${PLATFORM}" = "v1000nk" ]; then
+        if isCustomKernelPlatform "${PLATFORM}"; then
+          KERNEL="$(readConfigKey "kernel" "${USER_CONFIG_FILE}")"
           write_menu_value "K" "Kernel" "${KERNEL}"
         fi
 
@@ -276,12 +277,11 @@ elif [ "${ARC_MODE}" = "config" ]; then
           K)
             PLATFORM="$(readConfigKey "platform" "${USER_CONFIG_FILE}")"
             PRODUCTVER="$(readConfigKey "productver" "${USER_CONFIG_FILE}")"
+            KERNEL="$(readConfigKey "kernel" "${USER_CONFIG_FILE}")"
             KVER="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kver" "${P_FILE}")"
             KPRE="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kpre" "${P_FILE}")"
             KOPTS=("official" "Synology stock kernel (${KVER})")
             [ -f "${CUSTOM_PATH}/bzImage-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-legacy.gz" ] && KOPTS+=("legacy" "hybrid cpu support, better hardware support, optimized")
-            [ -f "${CUSTOM_PATH}/bzImage-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-full.gz" ] && KOPTS+=("full" "same as legacy + 64 thread support")
-            [ -f "${CUSTOM_PATH}/bzImage-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-upstreamed.gz" ] && KOPTS+=("upstreamed" "based on 5.10.260 + backports from legacy")
             dialog --backtitle "$(backtitle)" --title "Kernel" --colors \
               --default-item "${KERNEL}" --menu "Choose a kernel:" 0 0 0 \
               "${KOPTS[@]}" \

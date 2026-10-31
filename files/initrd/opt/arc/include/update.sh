@@ -72,16 +72,31 @@ function downloadWithGauge() {
     {
       curl -kL --retry 3 --retry-delay 2 --retry-all-errors "${DOWNLOAD_URL}" -o "${TMP_OUTPUT_PATH}" 2>&3 3>&-
     } 3>&1 >&4 4>&- |
-    DOWNLOAD_URL="${DOWNLOAD_URL}" perl -C -lane '
-      BEGIN {$header = "Downloading $ENV{DOWNLOAD_URL}...\n\n"; $| = 1}
-      $pcent = $F[0];
-      $_ = join "", unpack("x3 a7 x4 a9 x8 a9 x7 a*") if length > 20;
-      s/ /\xa0/g; # replacing space with nbsp as dialog squashes spaces
-      if ($. <= 3) {
-        $header .= "$_\n";
-        $/ = "\r" if $. == 2
-      } else {
-        print "XXX\n$pcent\n$header$_\nXXX"
+    # curl ends its two header lines with \n and then redraws its progress
+    # after each \r: lines end at \n until two are read, at \r after.
+    DOWNLOAD_URL="${DOWNLOAD_URL}" awk -v RS='\r' '
+      function emit(s, f) {
+        line++
+        split(s, f, " ")
+        pcent = f[1]
+        # % Total, % Received, Xferd and the rest, without the columns between
+        if (length(s) > 20) s = substr(s, 4, 7) substr(s, 15, 9) substr(s, 32, 9) substr(s, 48)
+        gsub(/ /, "\302\240", s) # replacing space with nbsp as dialog squashes spaces
+        if (line <= 3) {
+          header = header s "\n"
+        } else {
+          printf "XXX\n%s\n%s%s\nXXX\n", pcent, header, s
+          fflush()
+        }
+      }
+      BEGIN { header = "Downloading " ENVIRON["DOWNLOAD_URL"] "...\n\n" }
+      {
+        rec = $0
+        while (line < 2 && (p = index(rec, "\n")) > 0) {
+          emit(substr(rec, 1, p - 1))
+          rec = substr(rec, p + 1)
+        }
+        emit(rec)
       }' 4>&- |
     dialog --gauge "${GAUGE_TITLE}" 14 72 4>&-
   } 4>&1
@@ -136,23 +151,17 @@ function updateLoader() {
       FILE_SIZE="$(githubAssetSizeRetry "${API_URL}" "${TAG}" "update-${TAG}.zip" || true)"
 
       if [ -z "${FILE_SIZE}" ] || [ "${FILE_SIZE}" -eq 0 ]; then
-        dialog --backtitle "$(backtitle)" --title "Update Loader" \
-          --infobox "Failed to retrieve file size. Aborting update." 3 50
-        sleep 3
+        updateAborted "Failed to retrieve file size. Aborting update."
         return 1
       fi
 
       if [ "${TMP_AVAILABLE}" -lt "${FILE_SIZE}" ]; then
-        dialog --backtitle "$(backtitle)" --title "Update Loader" \
-          --infobox "Not enough space or RAM.\nRequired: $((FILE_SIZE / 1024 / 1024)) MB\nAvailable: $((TMP_AVAILABLE / 1024 / 1024)) MB." 5 50
-        sleep 3
+        updateAborted "Not enough space or RAM.\nRequired: $((FILE_SIZE / 1024 / 1024)) MB\nAvailable: $((TMP_AVAILABLE / 1024 / 1024)) MB."
         return 1
       fi
 
       if ! downloadWithGauge "${URL}" "${TMP_PATH}/update.zip" "Download Update: ${TAG}..."; then
-        dialog --backtitle "$(backtitle)" --title "Update Loader" \
-          --infobox "Download failed! Check network and try again." 3 50
-        sleep 3
+        updateAborted "Download failed! Check network and try again."
         return 1
       fi
     fi
@@ -160,16 +169,13 @@ function updateLoader() {
 
   if validateZipFile "${TMP_PATH}/update.zip" 1048576; then
     if [ "${TAG}" != "zip" ]; then
-      HASH="$(curl -skL "${UPDATE_URL}/${TAG}/update-${TAG}.hash" | awk '{print $1}')"
-      if [ "${BETA}" = "true" ]; then
-        HASH="$(curl -skL "${BETA_URL}/${TAG}/update-${TAG}.hash" | awk '{print $1}')"
-      fi
+      local HASH_URL="${UPDATE_URL}/${TAG}/update-${TAG}.hash"
+      [ "${BETA}" = "true" ] && HASH_URL="${BETA_URL}/${TAG}/update-${TAG}.hash"
+      HASH="$(curl -skL --retry 3 --retry-delay 2 --retry-all-errors "${HASH_URL}" | awk '{print $1}')"
 
       if [ "${HASH}" != "$(sha256sum "${TMP_PATH}/update.zip" | awk '{print $1}')" ]; then
-        dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-          --infobox "Update failed - Hash mismatch!\nTry again later." 0 0
-        sleep 3
         rm -f "${TMP_PATH}/update.zip"
+        updateAborted "Update failed - Hash mismatch!\nTry again later."
         return 1
       fi
     fi
@@ -193,6 +199,9 @@ function updateLoader() {
       # The theme ships as a whole file set; unzip only overwrites, so drop it
       # first to avoid orphans from a previous theme release.
       rm -rf "${GRUB_PATH}/theme"
+      # GRUB itself comes in p3/grub-update (see updateGrub); a leftover from an
+      # update that did not install it must not mix with this one.
+      rm -rf "${PART3_PATH}/grub-update"
       mkdir -p "${ADDONS_PATH}" "${CONFIGS_PATH}" "${CUSTOM_PATH}" "${LKMS_PATH}" "${MODULES_PATH}" "${PATCH_PATH}"
 
       echo "Extracting files from update.zip..."
@@ -242,15 +251,19 @@ function updateLoader() {
       fi
     fi
   else
-    if [ "${ARC_MODE}" = "update" ]; then
-      rm -f "${TMP_PATH}/update.zip"
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Update failed!\nReboot to Config Mode..." 0 0
-      sleep 3
-      rebootTo config
+    rm -f "${TMP_PATH}/update.zip"
+    if [ -z "${TAG}" ]; then
+      updateAborted "Could not find the latest release. Aborting update."
     else
-      return 1
+      updateAborted "Update failed - the update file is broken!\nTry again later."
     fi
+    return 1
+  fi
+
+  if ! updateGrub; then
+    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
+      --infobox "GRUB could not be updated completely!\nIf the loader does not boot, write the image again." 0 0
+    sleep 5
   fi
 
   # The release brought its own module packs, which can add or drop modules
@@ -270,6 +283,99 @@ function updateLoader() {
     sleep 3
     rebootTo config
   fi
+}
+
+# An update that failed before anything on the loader was changed. Update mode
+# runs with nobody at the console, so it boots DSM with the build the loader
+# already has rather than stop at the shell or in Config Mode; from the menu the
+# caller gets the failure back.
+function updateAborted() {
+  if [ "${ARC_MODE}" = "update" ]; then
+    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
+      --infobox "${1}\nBooting DSM with the current Loader..." 0 0
+    sleep 5
+    rebootTo dsm
+  fi
+  dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
+    --infobox "${1}" 0 0
+  sleep 3
+  return 1
+}
+
+###############################################################################
+# Update GRUB from the update zip. GRUB travels there as p3/grub-update:
+#   bootcode.img         the release image up to p1: MBR boot code and core.img
+#   EFI/BOOT/BOOT*.EFI   the EFI loaders
+#   boot/grub/<target>/  the modules, one directory per target
+# not under p1/, where an older Arc would extract BIOS modules next to the
+# boot code it leaves in place, and that GRUB does not start. It goes on the
+# loader in pairs that must match: the EFI modules with the EFI loaders, and
+# the BIOS modules with the boot code. The BIOS pair stays as it is when the
+# disk's boot code is not GRUB's (a GPT disk, another boot manager) or
+# core.img does not fit before p1; the old GRUB keeps working there.
+function updateGrub() {
+  local SRC="${PART3_PATH}/grub-update"
+  local T F SIZE RET=0
+  [ -d "${SRC}" ] || return 0
+
+  for T in i386-efi x86_64-efi; do
+    replaceGrubDir "${SRC}/boot/grub/${T}" "${GRUB_PATH}/${T}" || RET=1
+  done
+  for F in "${SRC}/EFI/BOOT/"*; do
+    [ -f "${F}" ] || continue
+    case "${F,,}" in *.efi) ;; *) continue ;; esac
+    mkdir -p "${PART1_PATH}/EFI/BOOT"
+    { cp -f "${F}" "${PART1_PATH}/EFI/BOOT/$(basename "${F}").part" &&
+      mv -f "${PART1_PATH}/EFI/BOOT/$(basename "${F}").part" "${PART1_PATH}/EFI/BOOT/$(basename "${F}")"; } || RET=1
+  done
+
+  if [ ${RET} -eq 0 ] && [ -d "${SRC}/boot/grub/i386-pc" ] &&
+    checkGrubBootCode "${LOADER_DISK}" "${SRC}/bootcode.img"; then
+    if replaceGrubDir "${SRC}/boot/grub/i386-pc" "${GRUB_PATH}/i386-pc"; then
+      # core.img into the gap before p1, then the MBR's boot code: its first
+      # 440 bytes, so the disk signature and partition table stay.
+      SIZE=$(stat -c%s "${SRC}/bootcode.img")
+      { dd if="${SRC}/bootcode.img" of="${LOADER_DISK}" bs=512 skip=1 seek=1 count=$((SIZE / 512 - 1)) conv=notrunc,fsync 2>/dev/null &&
+        dd if="${SRC}/bootcode.img" of="${LOADER_DISK}" bs=440 count=1 conv=notrunc,fsync 2>/dev/null; } || RET=1
+    else
+      RET=1
+    fi
+  fi
+
+  sync
+  rm -rf "${SRC}"
+  return ${RET}
+}
+
+# Put a copy of ${1} at ${2}. The copy is made beside ${2} first, so ${2} is
+# the old directory or the whole new one, never half of each.
+function replaceGrubDir() {
+  [ -d "${1}" ] || return 0
+  rm -rf "${2}.new" "${2}.old"
+  cp -r "${1}" "${2}.new" || { rm -rf "${2}.new"; return 1; }
+  if [ -d "${2}" ]; then
+    mv -f "${2}" "${2}.old" || { rm -rf "${2}.new"; return 1; }
+  fi
+  mv -f "${2}.new" "${2}" || return 1
+  rm -rf "${2}.old"
+}
+
+# Whether ${2}, the release image up to p1, can go on disk ${1}: both are MBR
+# disks with GRUB's boot code, and it ends before the disk's p1 begins.
+function checkGrubBootCode() {
+  local DISK="${1}" CODE="${2}" F I SIZE P1START
+  [ -b "${DISK}" ] && [ -f "${CODE}" ] || return 1
+  SIZE=$(stat -c%s "${CODE}" 2>/dev/null || echo 0)
+  [ "${SIZE}" -ge 1024 ] && [ $((SIZE % 512)) -eq 0 ] || return 1
+  for F in "${CODE}" "${DISK}"; do
+    [ "$(od -An -tx1 -j510 -N2 "${F}" | tr -d ' \n')" = "55aa" ] || return 1
+    head -c 440 "${F}" | grep -aq "GRUB" || return 1
+  done
+  for I in 0 1 2 3; do
+    [ "$(od -An -tx1 -j$((446 + 16 * I + 4)) -N1 "${DISK}" | tr -d ' \n')" = "ee" ] && return 1
+  done
+  P1START=$(od -An -tu4 -j454 -N4 "${DISK}" | tr -d ' \n')
+  [ -n "${P1START}" ] && [ $((P1START * 512)) -ge "${SIZE}" ]
 }
 
 ###############################################################################

@@ -14,6 +14,15 @@
 
 arc_mode
 
+# The build runs from Arc Control as well, inside a chroot under a DSM CGI,
+# and inherits the web server's umask there. Every file created below - the
+# addons.sh redirect, each addon's cp'd install.sh, the files addons copy into
+# the ramdisk - takes it, and a plain "chmod +x" leaves the bits it masks
+# alone. With the owner's x masked, addons.sh goes into the ramdisk as 0600
+# and linuxrc fails every hook with "Permission denied": no addon runs, no
+# model.dtb slots, DISK NOT INSTALLED.
+umask 022
+
 set -o pipefail # Get exit code from process piped
 
 # Read Model Data
@@ -192,6 +201,20 @@ if [[ "${PRODUCTVER}" > "7.2" ]]; then
   sed -i 's#/usr/syno/sbin/broadcom_update.sh#/usr/syno/sbin/broadcom_update.sh.arc#g' "${RAMDISK_PATH}/linuxrc.syno.impl"
 fi
 
+# linuxrc compares the ramdisk's VERSION with the installed system's
+# .syno/patch/VERSION on every boot: model, build, small fix, then packing
+# and packing_id. The .pat on Synology's download site, which arc-dsm's
+# boot files come from, has no packing; the one DSM's installer fetches
+# itself, on an install with no .pat uploaded, has packing="Epyc7003web".
+# A system installed that way failed the check on every boot ("root not
+# matched with junior") and DSM showed "Welcome back" with Restore, which
+# reinstalled the same build and failed again. The packing is not compared,
+# as DSM itself skips it when the system has .SkipCheckPackingMatch; the
+# model, build and small fix still are.
+if [ -f "${RAMDISK_PATH}/usr/syno/sbin/check_root_junior_match.sh" ]; then
+  sed -i 's/\[ ! -f \${RootMnt}\.SkipCheckPackingMatch \]/false/' "${RAMDISK_PATH}/usr/syno/sbin/check_root_junior_match.sh"
+fi
+
 # Addons
 mkdir -p "${RAMDISK_PATH}/addons"
 echo "Create addons.sh" >>"${LOG_FILE}"
@@ -209,14 +232,19 @@ echo "Create addons.sh" >>"${LOG_FILE}"
   echo "export LAYOUT=\"${LAYOUT:-qwerty}\""
   echo "export KEYMAP=\"${KEYMAP:-en}\""
 } >"${RAMDISK_PATH}/addons/addons.sh"
-chmod +x "${RAMDISK_PATH}/addons/addons.sh"
+makeExecutable "${RAMDISK_PATH}/addons/addons.sh" || exit 1
 
 # System Addons
 [ "${ARC_MODE}" != "dsm" ] && echo -e ">> Ramdisk: install addons"
 # sortnetif goes before misc: both run at the "patches" stage, and misc's
 # static address for the installer goes to the ifcfg of whichever interface
 # has the MAC at that moment -- the wrong one after a rename.
-SYSADDONS="revert sortnetif misc eudev disks localrss notify mountloader"
+# notification is DSM's notification category and the daemon behind the
+# webhook, Discord and DSM notifications and the loader update check, all set
+# in Arc Control. It took over notify and updatenotify. The loader's own
+# webhook and Discord settings are for its messages before DSM runs and are
+# not passed to it.
+SYSADDONS="revert sortnetif misc eudev disks localrss notification mountloader"
 if [ "${KVER:0:1}" = "5" ]; then
   SYSADDONS="redpill ${SYSADDONS}"
 fi
@@ -244,19 +272,10 @@ done
 
 # User Addons
 for ADDON in "${!ADDONS[@]}"; do
-  # Once a user addon, now a system one (sortnetif): installed above already.
+  # Once a user addon, now a system one (sortnetif, notification): installed
+  # above already.
   [[ " ${SYSADDONS} " == *" ${ADDON} "* ]] && continue
   PARAMS=""
-  if [ "${ADDON}" = "notification" ]; then
-    WEBHOOKNOTIFY="$(readConfigKey "arc.webhooknotify" "${USER_CONFIG_FILE}")"
-    [ "${WEBHOOKNOTIFY}" = "true" ] && WEBHOOK="$(readConfigKey "arc.webhookurl" "${USER_CONFIG_FILE}")"
-    # Quoted for its addons.sh line, where a bare & or ; would end the command.
-    Q="'\\''"
-    [ -n "${WEBHOOK}" ] && WEBHOOK="'${WEBHOOK//\'/${Q}}'"
-    DISCORDNOTIFY="$(readConfigKey "arc.discordnotify" "${USER_CONFIG_FILE}")"
-    [ "${DISCORDNOTIFY}" = "true" ] && DISCORDUSERID="$(readConfigKey "arc.userid" "${USER_CONFIG_FILE}")"
-    PARAMS="${WEBHOOK:-false} ${DISCORDUSERID:-false}"
-  fi
   if ! isAddonAvailable "${ADDON}" "${PLATFORM}"; then
     echo "WARNING: User addon ${ADDON} not available for ${PLATFORM}, skipping" | tee -a "${LOG_FILE}"
     continue
@@ -299,12 +318,12 @@ done
 if [ ! -x "${RAMDISK_PATH}/usr/bin/get_key_value" ]; then
   rm -rf "${RAMDISK_PATH}/usr/bin/get_key_value"
   printf '#!/bin/sh\n%s\n_get_conf_kv "$@"' "$(declare -f _get_conf_kv)" >"${RAMDISK_PATH}/usr/bin/get_key_value"
-  chmod a+x "${RAMDISK_PATH}/usr/bin/get_key_value"
+  makeExecutable "${RAMDISK_PATH}/usr/bin/get_key_value" || exit 1
 fi
 if [ ! -x "${RAMDISK_PATH}/usr/bin/set_key_value" ]; then
   rm -rf "${RAMDISK_PATH}/usr/bin/set_key_value"
   printf '#!/bin/sh\n%s\n_set_conf_kv "$@"' "$(declare -f _set_conf_kv)" >"${RAMDISK_PATH}/usr/bin/set_key_value"
-  chmod a+x "${RAMDISK_PATH}/usr/bin/set_key_value"
+  makeExecutable "${RAMDISK_PATH}/usr/bin/set_key_value" || exit 1
 fi
 
 # backup current loader configs

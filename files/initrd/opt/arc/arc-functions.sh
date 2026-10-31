@@ -79,28 +79,22 @@ function arcModel() {
                 COMPATIBLE=0
             fi
           fi
-          if [ "${DT}" = "true" ]; then
-            if [[ "${SCSICONTROLLER}" -ge 1 || "${RAIDCONTROLLER}" -ge 1 ]]; then
+          if [[ "${SCSICONTROLLER}" -ge 1 || "${RAIDCONTROLLER}" -ge 1 ]]; then
+            if [ "${KVER:0:1}" = "5" ]; then
+              echo -e "${WARN}- Linux 5.x Model selected: Raid/SCSI is experimental supported.\n" >>"${TMP_PATH}/${M}_warn"
+            elif [ "${DT}" = "true" ]; then
               echo -e "${WARN}- DT Model selected: Raid/SCSI is not supported.\n" >>"${TMP_PATH}/${M}_warn"
             fi
-            if [ "${SASCONTROLLER}" -ge 1 ]; then
-              echo -e "${WARN}- DT Model selected: HBA/SAS is experimental supported.\n" >>"${TMP_PATH}/${M}_warn"
-            fi
-          elif [ "${KVER:0:1}" = "5" ]; then
-            if [[ "${SCSICONTROLLER}" -ge 1 || "${RAIDCONTROLLER}" -ge 1 ]]; then
-              echo -e "${WARN}- Linux 5.x Model selected: Raid/SCSI is experimental supported.\n" >>"${TMP_PATH}/${M}_warn"
-            fi
+          fi
+          if [ "${KVER:0:1}" != "5" ] && [ "${DT}" = "true" ] && [ "${SASCONTROLLER}" -ge 1 ]; then
+            echo -e "${WARN}- DT Model selected: HBA/SAS is experimental supported.\n" >>"${TMP_PATH}/${M}_warn"
           fi
           if [ "${CPUCHT:-0}" -gt "${PLTCNT:-0}" ]; then
-            if [[ "${A}" = "epyc7002" || "${A}" = "geminilakenk" || "${A}" = "r1000nk" || "${A}" = "v1000nk" ]]; then
-              echo -e "${WARN}- CPU Threads (${CPUCHT}) exceed the maximum supported threads (${PLTCNT})\nYou should enable the custom (full) kernel.\n" >>"${TMP_PATH}/${M}_warn"
-            else
-              echo -e "${WARN}- CPU Threads (${CPUCHT}) exceed the maximum supported threads (${PLTCNT}).\n" >>"${TMP_PATH}/${M}_warn"
-            fi
+            echo -e "${WARN}- CPU Threads (${CPUCHT}) exceed the maximum supported threads (${PLTCNT}).\n" >>"${TMP_PATH}/${M}_warn"
           fi
-          if [[ "${A}" != "epyc7002" && "${A}" != "geminilakenk" && "${A}" != "r1000nk" && "${A}" != "v1000nk" && "${MEV}" = "hyperv" ]]; then
+          if ! isCustomKernelPlatform "${A}" && [ "${MEV}" = "hyperv" ]; then
             COMPATIBLE=0
-          elif [[ "${A}" = "epyc7002" || "${A}" = "geminilakenk" || "${A}" = "r1000nk" || "${A}" = "v1000nk" ]] && [[ "${MEV}" = "hyperv" ]]; then
+          elif isCustomKernelPlatform "${A}" && [ "${MEV}" = "hyperv" ]; then
             echo -e "${WARN}- Hyper-V VM: You need to enable the custom kernel.\n" >>"${TMP_PATH}/${M}_warn"
           fi
         else
@@ -258,7 +252,15 @@ function arcVersion() {
     writeConfigKey "smallnum" "${SMALLNUM:-0}" "${USER_CONFIG_FILE}"
     writeConfigKey "ramdisk-hash" "" "${USER_CONFIG_FILE}"
     writeConfigKey "zimage-hash" "" "${USER_CONFIG_FILE}"
-    writeConfigKey "kernel" "official" "${USER_CONFIG_FILE}"
+    # Keep the custom kernel if the new version ships one, else back to official
+    KVER="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kver" "${P_FILE}")"
+    KPRE="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kpre" "${P_FILE}")"
+    KERNEL="$(readConfigKey "kernel" "${USER_CONFIG_FILE}")"
+    if [ "${KERNEL}" != "official" ] && [ ! -f "${CUSTOM_PATH}/bzImage-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-${KERNEL}.gz" ]; then
+      KERNEL="official"
+    fi
+    KERNEL="${KERNEL:-official}"
+    writeConfigKey "kernel" "${KERNEL}" "${USER_CONFIG_FILE}"
 
     PAT_URL_UPDATE="$(readConfigKey "${PLATFORM}.\"${MODEL}\".\"${resp}\".url" "${D_FILE}")"
     PAT_HASH_UPDATE="$(readConfigKey "${PLATFORM}.\"${MODEL}\".\"${resp}\".hash" "${D_FILE}")"
@@ -276,22 +278,19 @@ function arcVersion() {
 
   if [ "${ONLYVERSION}" != "true" ] && [ "${ARC_MODE}" = "config" ]; then
     USERID="$(readConfigKey "arc.userid" "${USER_CONFIG_FILE}")"
-    ADDONS_LIST="$(readConfigMap "addons" "${USER_CONFIG_FILE}")"
-    if [ -n "${USERID}" ] && ! echo "${ADDONS_LIST}" | grep -q "notification"; then
+    if [ -n "${USERID}" ] && [ "$(readConfigKey "arc.discordnotify" "${USER_CONFIG_FILE}")" != "true" ]; then
       MSG="Enable Discord Notification for Loader Mode and DSM Status?"
       dialog --backtitle "$(backtitle)" --colors --title "Notification" \
         --yesno "${MSG}" 5 65
       [ $? -eq 0 ] && writeConfigKey "arc.discordnotify" "true" "${USER_CONFIG_FILE}"
     fi
     KVER="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kver" "${P_FILE}")"
-    if [ "${KVER:0:1}" -eq 5 ] && [[ "${PRODUCTVER}" > "7.2" ]]; then
-      if [[ "${PLATFORM}" = "epyc7002" || "${PLATFORM}" = "geminilakenk" || "${PLATFORM}" = "r1000nk" || "${PLATFORM}" = "v1000nk" ]]; then
+    if [ "${KVER:0:1}" -eq 5 ]; then
+      if isCustomKernelPlatform "${PLATFORM}" "${PRODUCTVER}"; then
         KPRE="$(readConfigKey "platforms.${PLATFORM}.productvers.\"${PRODUCTVER}\".kpre" "${P_FILE}")"
         KERNEL="$(readConfigKey "kernel" "${USER_CONFIG_FILE}")"
         KOPTS=("official" "Synology stock kernel (${KVER})")
         [ -f "${CUSTOM_PATH}/bzImage-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-legacy.gz" ] && KOPTS+=("legacy" "hybrid cpu support, better hardware support, optimized")
-        [ -f "${CUSTOM_PATH}/bzImage-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-full.gz" ] && KOPTS+=("full" "same as legacy + 64 thread support")
-        [ -f "${CUSTOM_PATH}/bzImage-${PLATFORM}-${KPRE:+${KPRE}-}${KVER}-upstreamed.gz" ] && KOPTS+=("upstreamed" "based on 5.10.260 + backports from legacy")
         dialog --backtitle "$(backtitle)" --title "Custom Kernel" --colors \
           --default-item "${KERNEL}" --menu "You selected a Linux 5.x based platform and DSM ${PRODUCTVER}!\nA custom kernel is available for this combination.\n\nChoose a kernel:" 0 0 0 \
           "${KOPTS[@]}" \
@@ -365,7 +364,7 @@ function arcPatch() {
     if [ ! -f "${ORI_ZIMAGE_FILE}" ] || [ ! -f "${ORI_RDGZ_FILE}" ]; then
       SN="$(genArc "true" "${MODEL}" sn 2>/dev/null)"
       ARC_PATCH="false"
-      [ "${#SN}" -eq 13 ] && ARC_PATCH="true" || SN="$(genArc "false" "${MODEL}" sn 2>/dev/null)"
+      [ "${#SN}" -eq 13 ] && ARC_PATCH="true" || SN="$(makeArc "${MODEL}" sn 2>/dev/null)"
     fi
   elif [ "${ARC_MODE}" = "config" ]; then
     SN="$(genArc "true" "${MODEL}" sn 2>/dev/null)"
@@ -373,7 +372,7 @@ function arcPatch() {
       2 "Use random SN/Mac (Reduced DSM Features)"
       3 "Use my own SN/Mac (Be sure your Data is valid)"
     )
-    [ "${#SN}" -eq 13 ] && OPTIONS=(1 "Use Arc Patch (AME, QC, Push Notify and more)" "${OPTIONS[@]}")
+    [ "${#SN}" -eq 13 ] && OPTIONS=(1 "Use Arc Patch (AME, QC and more)" "${OPTIONS[@]}")
 
     dialog --clear --backtitle "$(backtitle)" \
       --nocancel --title "SN/Mac Options" \
@@ -391,7 +390,7 @@ function arcPatch() {
         ;;
       2)
         ARC_PATCH="false"
-        SN="$(genArc "${ARC_PATCH}" "${MODEL}" sn 2>/dev/null)"
+        SN="$(makeArc "${MODEL}" sn 2>/dev/null)"
         ;;
       3)
         while true; do
@@ -599,12 +598,10 @@ function init_default_addons() {
   initConfigKey "addons.acpid" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.arcdns" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.cpuinfo" "" "${USER_CONFIG_FILE}"
-  initConfigKey "addons.diskcompat" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.hdddb" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.mountloader" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.reducelogs" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.storagepanel" "" "${USER_CONFIG_FILE}"
-  initConfigKey "addons.updatenotify" "" "${USER_CONFIG_FILE}"
   if [[ "${NVMEDRIVES}" -gt 0 && "${BUS}" != "nvme" ]] || [[ "${NVMEDRIVES}" -gt 1 && "${BUS}" = "nvme" ]]; then
     if [ "${KVER:0:1}" = "5" ] && [ "${SATADRIVES}" -eq 0 ] && [ "${SASDRIVES}" -eq 0 ] && [ "${BUS}" != "sata" ]; then
       initConfigKey "addons.nvmesystem" "" "${USER_CONFIG_FILE}"
@@ -641,11 +638,6 @@ function init_default_addons() {
   fi
   if [ "${EXTERNALCONTROLLER}" = "true" ]; then
     initConfigKey "addons.smartctl" "" "${USER_CONFIG_FILE}"
-  fi
-  WEBHOOKNOTIFY="$(readConfigKey "arc.webhooknotify" "${USER_CONFIG_FILE}")"
-  DISCORDNOTIFY="$(readConfigKey "arc.discordnotify" "${USER_CONFIG_FILE}")"
-  if [ "${WEBHOOKNOTIFY}" = "true" ] || [ "${DISCORDNOTIFY}" = "true" ]; then
-    initConfigKey "addons.notification" "" "${USER_CONFIG_FILE}"
   fi
 }
 
@@ -1770,7 +1762,7 @@ function sysinfo() {
   # Get System Informations
   [ -d /sys/firmware/efi ] && BOOTSYS="UEFI" || BOOTSYS="BIOS"
   USERID="$(readConfigKey "arc.userid" "${USER_CONFIG_FILE}")"
-  CPU="$(cat /proc/cpuinfo 2>/dev/null | grep 'model name' | uniq | awk -F':' '{print $2}')"
+  CPU="$(cat /proc/cpuinfo 2>/dev/null | grep 'model name' | uniq | awk -F':' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   CPUCHT="$(grep -c ^processor /proc/cpuinfo 2>/dev/null)"
   CPUCNT="$(awk -F': ' '/^physical id/{p=$2} /^core id/{print p","$2}' /proc/cpuinfo 2>/dev/null | sort -u | wc -l)"
   [ -z "${CPUCNT}" ] || [ "${CPUCNT}" -eq 0 ] && CPUCNT="${CPUCHT}"
@@ -2513,7 +2505,7 @@ function loaderPassword() {
   mkdir -p "${RDXZ_PATH}"
 
   if [ -f "${ARC_RAMDISK_USER_FILE}" ]; then
-    local INITRD_FORMAT=$(file -b --mime-type "${ARC_RAMDISK_USER_FILE}")
+    local INITRD_FORMAT=$(ramdiskFormat "${ARC_RAMDISK_USER_FILE}")
     (
       cd "${RDXZ_PATH}"
       case "${INITRD_FORMAT}" in
@@ -2542,15 +2534,14 @@ function loaderPassword() {
     if [ "${SHOW_DIALOG}" = "true" ]; then
       (
         cd "${RDXZ_PATH}"
-        local RDSIZE=$(du -sb ${RDXZ_PATH} 2>/dev/null | awk '{print $1}')
         case "${INITRD_FORMAT}" in
-        *'x-cpio'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} >"${ARC_RAMDISK_USER_FILE}" ;;
-        *'x-xz'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | xz -9 -C crc32 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-        *'x-lz4'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | lz4 -9 -l -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-        *'x-lzma'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | lzma -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-        *'x-bzip2'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | bzip2 -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-        *'gzip'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | gzip -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-        *'zstd'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | zstd -19 -T0 -f -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+        *'x-cpio'*) find . 2>/dev/null | cpio -o -H newc -R root:root >"${ARC_RAMDISK_USER_FILE}" ;;
+        *'x-xz'*) find . 2>/dev/null | cpio -o -H newc -R root:root | xz -9 -C crc32 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+        *'x-lz4'*) find . 2>/dev/null | cpio -o -H newc -R root:root | lz4 -9 -l -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+        *'x-lzma'*) find . 2>/dev/null | cpio -o -H newc -R root:root | lzma -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+        *'x-bzip2'*) find . 2>/dev/null | cpio -o -H newc -R root:root | bzip2 -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+        *'gzip'*) find . 2>/dev/null | cpio -o -H newc -R root:root | gzip -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+        *'zstd'*) find . 2>/dev/null | cpio -o -H newc -R root:root | zstd -19 -T0 -f -c - >"${ARC_RAMDISK_USER_FILE}" ;;
         *) ;;
         esac
       ) 2>&1 | dialog --backtitle "$(backtitle)" --title "Loader Password" \
@@ -2623,7 +2614,7 @@ function loaderPorts() {
       rm -rf "${RDXZ_PATH}"
       mkdir -p "${RDXZ_PATH}"
       if [ -f "${ARC_RAMDISK_USER_FILE}" ]; then
-        INITRD_FORMAT=$(file -b --mime-type "${ARC_RAMDISK_USER_FILE}")
+        INITRD_FORMAT=$(ramdiskFormat "${ARC_RAMDISK_USER_FILE}")
         (
           cd "${RDXZ_PATH}"
           case "${INITRD_FORMAT}" in
@@ -2649,15 +2640,14 @@ function loaderPorts() {
       if [ -n "$(ls -A "${RDXZ_PATH}" 2>/dev/null)" ] && [ -n "$(ls -A "${RDXZ_PATH}/etc" 2>/dev/null)" ]; then
         (
           cd "${RDXZ_PATH}"
-          local RDSIZE=$(du -sb ${RDXZ_PATH} 2>/dev/null | awk '{print $1}')
           case "${INITRD_FORMAT}" in
-          *'x-cpio'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} >"${ARC_RAMDISK_USER_FILE}" ;;
-          *'x-xz'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | xz -9 -C crc32 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-          *'x-lz4'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | lz4 -9 -l -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-          *'x-lzma'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | lzma -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-          *'x-bzip2'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | bzip2 -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-          *'gzip'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | gzip -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
-          *'zstd'*) find . 2>/dev/null | cpio -o -H newc -R root:root | pv -n -s ${RDSIZE:-1} | zstd -19 -T0 -f -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+          *'x-cpio'*) find . 2>/dev/null | cpio -o -H newc -R root:root >"${ARC_RAMDISK_USER_FILE}" ;;
+          *'x-xz'*) find . 2>/dev/null | cpio -o -H newc -R root:root | xz -9 -C crc32 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+          *'x-lz4'*) find . 2>/dev/null | cpio -o -H newc -R root:root | lz4 -9 -l -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+          *'x-lzma'*) find . 2>/dev/null | cpio -o -H newc -R root:root | lzma -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+          *'x-bzip2'*) find . 2>/dev/null | cpio -o -H newc -R root:root | bzip2 -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+          *'gzip'*) find . 2>/dev/null | cpio -o -H newc -R root:root | gzip -9 -c - >"${ARC_RAMDISK_USER_FILE}" ;;
+          *'zstd'*) find . 2>/dev/null | cpio -o -H newc -R root:root | zstd -19 -T0 -f -c - >"${ARC_RAMDISK_USER_FILE}" ;;
           *) ;;
           esac
         ) 2>&1 | dialog --backtitle "$(backtitle)" --title "Loader Ports" \
@@ -2926,19 +2916,42 @@ function formatDisks() {
 }
 
 ###############################################################################
-# Clone bootloader disk
+# Clone bootloader disk, as arx clones it: the loader disk itself, up to
+# the end of its last partition -- the boot code before p1, the partition
+# table and p1 to p3, labels and UUIDs included -- so the copy boots as
+# this one does. No image of its own to keep in step with the build.
 function cloneLoader() {
+  local NAME P START PSIZE END=0 COUNT KNAME SIZE TYPE DMODEL PKNAME BYTES
+  NAME="$(basename "${LOADER_DISK}")"
+  for P in /sys/block/"${NAME}"/"${NAME}"*; do
+    [ -f "${P}/start" ] && [ -f "${P}/size" ] || continue
+    START="$(cat "${P}/start")"
+    PSIZE="$(cat "${P}/size")"
+    [ $((START + PSIZE)) -gt "${END}" ] && END=$((START + PSIZE))
+  done
+  if [ "${END}" -eq 0 ]; then
+    dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
+      --msgbox "No partitions found on ${LOADER_DISK}!" 0 0
+    return
+  fi
+  # In MiB, rounded up: a partition ends on a sector, dd counts blocks.
+  COUNT=$(((END + 2047) / 2048))
+
+  # Whole disks only, the copy brings its own partition table, and only
+  # those that hold the loader whole.
   rm -f "${TMP_PATH}/opts" 2>/dev/null
   while read -r KNAME SIZE TYPE DMODEL PKNAME; do
     [ "${KNAME}" = "N/A" ] || [ "${SIZE:0:1}" -eq 0 ] && continue
-    [ "${KNAME:0:7}" = "/dev/md" ] && continue
-    [ "${KNAME}" = "${LOADER_DISK}" ] || [ "${PKNAME}" = "${LOADER_DISK}" ] && continue
+    [ "${TYPE}" = "disk" ] || continue
+    [ "${KNAME}" = "${LOADER_DISK}" ] && continue
+    BYTES="$(cat "/sys/block/$(basename "${KNAME}")/size" 2>/dev/null)"
+    [ $((${BYTES:-0} / 2048)) -ge "${COUNT}" ] || continue
     printf "\"%s\" \"%-6s %-4s %s\" \"off\"\n" "${KNAME}" "${SIZE}" "${TYPE}" "${DMODEL}" >>"${TMP_PATH}/opts"
   done <<<"$(lsblk -Jpno KNAME,SIZE,TYPE,MODEL,PKNAME 2>/dev/null | sed 's|null|"N/A"|g' | jq -r '.blockdevices[] | "\(.kname) \(.size) \(.type) \(.model) \(.pkname)"' 2>/dev/null)"
 
   if [ ! -f "${TMP_PATH}/opts" ]; then
     dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
-      --msgbox "No disk found!" 0 0
+      --msgbox "No disk found that can hold the loader (${COUNT} MB)!" 0 0
     return
   fi
   dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
@@ -2950,86 +2963,41 @@ function cloneLoader() {
     dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
       --msgbox "No disk selected!" 0 0
     return
-  else
-    SIZE=$(df -m "${resp}" 2>/dev/null | awk 'NR=2 {print $2}')
-    if [ "${SIZE:-0}" -lt 1024 ]; then
-      dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
-        --msgbox "Disk ${resp} size is less than 1GB and cannot be cloned!" 0 0
-      return
-    fi
-    MSG=""
-    MSG+="Warning:\nDisk ${resp} will be formatted and written to the bootloader. Please confirm that important data has been backed up. \nDo you want to continue?"
-    dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
-      --yesno "${MSG}" 0 0
-    [ $? -ne 0 ] && return 1
   fi
+  MSG=""
+  MSG+="Warning:\nDisk ${resp} will be formatted and written to the bootloader. Please confirm that important data has been backed up. \nDo you want to continue?"
+  dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
+    --yesno "${MSG}" 0 0
+  [ $? -ne 0 ] && return 1
+
+  rm -f "${TMP_PATH}/cloned"
   (
-    CLEARCACHE=0
-
-    gzip -dc "${ARC_PATH}/grub.img.gz" | dd of="${resp}" bs=1M conv=fsync status=progress
-    # hdparm speaks ATA, which eMMC/NVMe/loop devices do not answer to
-    case "${resp}" in
-    *mmcblk* | *nvme[0-9]* | *loop[0-9]* | *nbd[0-9]*) ;;
-    *) hdparm -z "${resp}" ;; # reset disk cache
-    esac
-    fdisk -l "${resp}"
-    sleep 1
-
-    NEW_BLDISK_P1="$(blkid | grep -v "${LOADER_DISK_PART1}:" | awk -F: '/LABEL="ARC1"/ {print $1}')"
-    NEW_BLDISK_P2="$(blkid | grep -v "${LOADER_DISK_PART2}:" | awk -F: '/LABEL="ARC2"/ {print $1}')"
-    NEW_BLDISK_P3="$(blkid | grep -v "${LOADER_DISK_PART3}:" | awk -F: '/LABEL="ARC3"/ {print $1}')"
-
-    mkdir -p "${TMP_PATH}/sdX1" "${TMP_PATH}/sdX2" "${TMP_PATH}/sdX3"
-    mount "${NEW_BLDISK_P1}" "${TMP_PATH}/sdX1" || {
-      printf "Can't mount %s." "${NEW_BLDISK_P1}" >"${LOG_FILE}"
-      __umountNewBlDisk
-      break
-    }
-    mount "${NEW_BLDISK_P2}" "${TMP_PATH}/sdX2" || {
-      printf "Can't mount %s." "${NEW_BLDISK_P2}" >"${LOG_FILE}"
-      __umountNewBlDisk
-      break
-    }
-    mount "${NEW_BLDISK_P3}" "${TMP_PATH}/sdX3" || {
-      printf "Can't mount %s." "${NEW_BLDISK_P3}" >"${LOG_FILE}"
-      __umountNewBlDisk
-      break
-    }
-
-    SIZEOLD1="$(du -sm "${PART1_PATH}" 2>/dev/null | awk '{print $1}')"
-    SIZEOLD2="$(du -sm "${PART2_PATH}" 2>/dev/null | awk '{print $1}')"
-    SIZEOLD3="$(du -sm "${PART3_PATH}" 2>/dev/null | awk '{print $1}')"
-    SIZENEW1="$(df -m "${NEW_BLDISK_P1}" 2>/dev/null | awk 'NR==2 {print $4}')"
-    SIZENEW2="$(df -m "${NEW_BLDISK_P2}" 2>/dev/null | awk 'NR==2 {print $4}')"
-    SIZENEW3="$(df -m "${NEW_BLDISK_P3}" 2>/dev/null | awk 'NR==2 {print $4}')"
-
-    if [ "${SIZEOLD1:-0}" -ge "${SIZENEW1:-0}" ] || [ "${SIZEOLD2:-0}" -ge "${SIZENEW2:-0}" ] || [ "${SIZEOLD3:-0}" -ge "${SIZENEW3:-0}" ]; then
-      MSG="Cloning failed due to insufficient remaining disk space on the selected hard drive."
-      echo "${MSG}" >"${LOG_FILE}"
-      __umountNewBlDisk
-      break
-    fi
-
-    cp -vRf "${PART1_PATH}/". "${TMP_PATH}/sdX1/" || {
-      printf "Can't copy to %s." "${NEW_BLDISK_P1}" >"${LOG_FILE}"
-      __umountNewBlDisk
-      break
-    }
-    cp -vRf "${PART2_PATH}/". "${TMP_PATH}/sdX2/" || {
-      printf "Can't copy to %s." "${NEW_BLDISK_P2}" >"${LOG_FILE}"
-      __umountNewBlDisk
-      break
-    }
-    cp -vRf "${PART3_PATH}/". "${TMP_PATH}/sdX3/" || {
-      printf "Can't copy to %s." "${NEW_BLDISK_P3}" >"${LOG_FILE}"
-      __umountNewBlDisk
-      break
-    }
+    # Read-only while it is copied, so the copy is of one moment; put back
+    # afterwards.
     sync
-    __umountNewBlDisk
+    RO=""
+    for P in "${PART1_PATH}" "${PART2_PATH}" "${PART3_PATH}"; do
+      mount -o remount,ro "${P}" 2>/dev/null && RO="${RO} ${P}"
+    done
+    # Old signatures on the target, a backup GPT at its end most of all,
+    # would outlive the copy.
+    wipefs -af "${resp}"
+    dd if="${LOADER_DISK}" of="${resp}" bs=1M count="${COUNT}" conv=fsync status=progress && touch "${TMP_PATH}/cloned"
+    for P in ${RO}; do
+      mount -o remount,rw "${P}"
+    done
+    # The kernel still holds the target's old table otherwise.
+    partx -d "${resp}" 2>/dev/null
+    partx -a "${resp}" 2>/dev/null
+    fdisk -l "${resp}"
     sleep 3
   ) 2>&1 | dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
     --progressbox "Cloning ..." 20 100
+  if [ ! -f "${TMP_PATH}/cloned" ]; then
+    dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
+      --msgbox "Cloning to Disk ${resp} failed!" 0 0
+    return 1
+  fi
   dialog --backtitle "$(backtitle)" --colors --title "Clone Loader" \
     --msgbox "Bootloader has been cloned to Disk ${resp}.\nReboot to boot from the internal disk or keep the USB connected to boot from it." 0 0
   rebootTo config
@@ -3650,7 +3618,15 @@ function getnet() {
   MODEL="$(readConfigKey "model" "${USER_CONFIG_FILE}")"
   ARC_PATCH="$(readConfigKey "arc.patch" "${USER_CONFIG_FILE}")"
 
-  if [ "${ARC_PATCH}" = "user" ]; then
+  if [ "${ARC_PATCH}" = "user" ] && [ "${ARC_MODE}" != "config" ]; then
+    # An automated build (after an update, say) has nobody to type MACs: keep
+    # the ones set while configuring, and a NIC added since keeps its own.
+    for N in ${ETHX}; do
+      MAC="$(readConfigKey "${N}" "${USER_CONFIG_FILE}")"
+      [ "${#MAC}" -ne 12 ] && MAC="$(cat "/sys/class/net/${N}/address" 2>/dev/null | sed 's/://g')"
+      writeConfigKey "${N}" "$(echo "${MAC}" | tr '[:upper:]' '[:lower:]')" "${USER_CONFIG_FILE}"
+    done
+  elif [ "${ARC_PATCH}" = "user" ]; then
     for N in ${ETHX}; do
       while true; do
         dialog --backtitle "$(backtitle)" --title "Mac Setting" \
@@ -3670,10 +3646,16 @@ function getnet() {
       done
     done
   else
-    readarray -t ETHX_ARRAY <<<"$(find /sys/class/net/ -mindepth 1 -maxdepth 1 -name 'eth*' -exec basename {} \; | sort)"
+    # sort -V, as everywhere else: plain sort puts eth10 before eth2, and the
+    # Arc Patch MACs go out by position.
+    readarray -t ETHX_ARRAY <<<"$(find /sys/class/net/ -mindepth 1 -maxdepth 1 -name 'eth*' -exec basename {} \; | sort -V)"
     ETHN=${#ETHX_ARRAY[@]}
 
-    MACS_OUTPUT=$(genArc "${ARC_PATCH}" "${MODEL}" mac "${ETHN}" 2>/dev/null)
+    if [ "${ARC_PATCH}" = "true" ]; then
+      MACS_OUTPUT=$(genArc "true" "${MODEL}" mac "${ETHN}" 2>/dev/null)
+    else
+      MACS_OUTPUT=$(makeArc "${MODEL}" mac "${ETHN}" 2>/dev/null)
+    fi
     MACS_OUTPUT=${MACS_OUTPUT//$'\r'/}
     MACS_OUTPUT=$(printf '%s' "$MACS_OUTPUT" | tr -s '[:space:]' $'\n' | sed '/^$/d')
     readarray -t MACS_ARRAY <<< "$MACS_OUTPUT"
@@ -3975,14 +3957,12 @@ function getnetinfo() {
 }
 
 ###############################################################################
-# Bootloader notifications
+# Bootloader notifications: the loader's own messages, before DSM runs - Arc's
+# config mode and DSM booting. Read at boot, so no rebuild is needed. DSM's
+# notifications, from the notification system addon, are set in Arc Control.
 function notificationMenu() {
   WEBHOOKNOTIFY="$(readConfigKey "arc.webhooknotify" "${USER_CONFIG_FILE}")"
   DISCORDNOTIFY="$(readConfigKey "arc.discordnotify" "${USER_CONFIG_FILE}")"
-  # Remember the current Settings to detect real changes
-  WEBHOOKNOTIFYOLD="${WEBHOOKNOTIFY}"
-  WEBHOOKURLOLD="$(readConfigKey "arc.webhookurl" "${USER_CONFIG_FILE}")"
-  DISCORDNOTIFYOLD="${DISCORDNOTIFY}"
   # Submenu for notification type
   dialog --backtitle "$(backtitle)" --title "Notification Type" \
     --menu "Choose notification type:" 10 60 2 \
@@ -4010,7 +3990,6 @@ function notificationMenu() {
         # ok-button
         writeConfigKey "arc.webhooknotify" "true" "${USER_CONFIG_FILE}"
         writeConfigKey "arc.webhookurl" "${WEBHOOKURL}" "${USER_CONFIG_FILE}"
-        writeConfigKey "addons.notification" "" "${USER_CONFIG_FILE}"
         break
         ;;
       3)
@@ -4021,7 +4000,6 @@ function notificationMenu() {
         # cancel-button
         writeConfigKey "arc.webhooknotify" "false" "${USER_CONFIG_FILE}"
         writeConfigKey "arc.webhookurl" "" "${USER_CONFIG_FILE}"
-        deleteConfigKey "addons.notification" "${USER_CONFIG_FILE}"
         break
         ;;
       *)
@@ -4049,7 +4027,6 @@ function notificationMenu() {
       0)
         # ok-button
         writeConfigKey "arc.discordnotify" "true" "${USER_CONFIG_FILE}"
-        writeConfigKey "addons.notification" "" "${USER_CONFIG_FILE}"
         break
         ;;
       3)
@@ -4059,7 +4036,6 @@ function notificationMenu() {
       1)
         # cancel-button
         writeConfigKey "arc.discordnotify" "false" "${USER_CONFIG_FILE}"
-        deleteConfigKey "addons.notification" "${USER_CONFIG_FILE}"
         break
         ;;
       *)
@@ -4069,13 +4045,6 @@ function notificationMenu() {
       esac
       DISCORDNOTIFY="$(readConfigKey "arc.discordnotify" "${USER_CONFIG_FILE}")"
     done
-  fi
-  # Force a Rebuild only if the Notification Settings really changed
-  WEBHOOKNOTIFY="$(readConfigKey "arc.webhooknotify" "${USER_CONFIG_FILE}")"
-  WEBHOOKURL="$(readConfigKey "arc.webhookurl" "${USER_CONFIG_FILE}")"
-  DISCORDNOTIFY="$(readConfigKey "arc.discordnotify" "${USER_CONFIG_FILE}")"
-  if [ "${WEBHOOKNOTIFY}" != "${WEBHOOKNOTIFYOLD}" ] || [ "${WEBHOOKURL}" != "${WEBHOOKURLOLD}" ] || [ "${DISCORDNOTIFY}" != "${DISCORDNOTIFYOLD}" ]; then
-    resetBuildstatus
   fi
   return
 }
